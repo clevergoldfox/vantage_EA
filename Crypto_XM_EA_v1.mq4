@@ -20,17 +20,17 @@ extern double MinLotOverride        = 0.0;  // If >0, override broker min lot (r
 extern int    Slippage              = 5;
 extern int    MaxSpreadPoints       = 1500;  // points (e.g., 400 = 40 pips if 5-digit; crypto varies)
 
-extern int    EMAFast               = 55;
+extern int    EMAFast               = 50;
 extern int    EMASlow               = 200;
 
 extern int    RSIPeriod             = 14;
 extern double RSI_BuyLevel          = 45.0; // Pullback threshold for buys
-extern double RSI_SellLevel         = 52.0; // Pullback threshold for sells
+extern double RSI_SellLevel         = 55.0; // Pullback threshold for sells
 extern bool   UseRSICrossConfirm    = true; // Confirm RSI turning direction using previous bar
 
 extern int    ATRPeriod             = 14;
-extern double StopATR_Mult          = 2.5;  // SL = ATR * mult
-extern double TakeATR_Mult          = 5.0;  // TP = ATR * mult
+extern double StopATR_Mult          = 2.2;  // SL = ATR * mult
+extern double TakeATR_Mult          = 5.2;  // TP = ATR * mult
 
 extern bool   UseTrailingStop       = false;
 extern double TrailATR_Mult         = 1.5;  // trailing distance = ATR * mult
@@ -102,84 +102,65 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Signal Engine (M30 only)                                          |
-//| Trend: EMA50 / EMA200 + slope                                    |
-//| Entry: RSI pullback + momentum candle                            |
+//| Improved Signal Engine (M30)                                      |
+//| EMA trend + EMA pullback + RSI reversal                           |
 //+------------------------------------------------------------------+
 int GetSignal()
 {
    int tf = WorkingTimeframe;
 
-   // --- Safety: only run on M30 ---
-   if(tf != PERIOD_M30)
-      return 0;
-
-   // --- Indicator values (closed candles only) ---
+   // --- EMA values (closed candles only)
    double emaFast_1 = iMA(Symbol(), tf, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 1);
    double emaFast_2 = iMA(Symbol(), tf, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 2);
-
    double emaSlow_1 = iMA(Symbol(), tf, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 1);
-   double emaSlow_2 = iMA(Symbol(), tf, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 2);
 
+   // --- Price
+   double close_1 = iClose(Symbol(), tf, 1);
+   double close_2 = iClose(Symbol(), tf, 2);
+
+   // --- RSI
    double rsi_1 = iRSI(Symbol(), tf, RSIPeriod, PRICE_CLOSE, 1);
    double rsi_2 = iRSI(Symbol(), tf, RSIPeriod, PRICE_CLOSE, 2);
 
+   // --- ATR filter (avoid dead market)
    double atr = iATR(Symbol(), tf, ATRPeriod, 1);
-   if(atr <= 0)
-      return 0;
+   if(atr <= 0) return 0;
 
-   // --- Candle data ---
-   double close1 = iClose(Symbol(), tf, 1);
-   double open1  = iOpen(Symbol(), tf, 1);
-   double close2 = iClose(Symbol(), tf, 2);
+   //==================================================
+   // Trend definition
+   //==================================================
+   bool upTrend   = (emaFast_1 > emaSlow_1) && (emaFast_1 > emaFast_2);
+   bool downTrend = (emaFast_1 < emaSlow_1) && (emaFast_1 < emaFast_2);
 
-   bool bullishCandle = close1 > open1;
-   bool bearishCandle = close1 < open1;
+   //==================================================
+   // Pullback definition (price near EMAFast)
+   //==================================================
+   double pullbackRange = atr * 0.6;
 
-   // --- EMA trend + slope ---
-   bool trendUp   = (emaFast_1 > emaSlow_1) && (emaFast_1 > emaFast_2);
-   bool trendDown = (emaFast_1 < emaSlow_1) && (emaFast_1 < emaFast_2);
+   bool pricePullbackBuy  = (close_1 <= emaFast_1 + pullbackRange);
+   bool pricePullbackSell = (close_1 >= emaFast_1 - pullbackRange);
 
-   // --- Price pullback proximity (avoid late entries) ---
-   double maxPullbackDist = atr * 1.2;
+   //==================================================
+   // RSI reversal
+   //==================================================
+   bool rsiBuy =
+      (rsi_2 < RSI_BuyLevel) &&
+      (rsi_1 > rsi_2) &&
+      (rsi_1 < 55);
 
-   bool priceNearEMA =
-      MathAbs(close1 - emaFast_1) <= maxPullbackDist;
+   bool rsiSell =
+      (rsi_2 > RSI_SellLevel) &&
+      (rsi_1 < rsi_2) &&
+      (rsi_1 > 45);
 
-   if(!priceNearEMA)
-      return 0;
+   //==================================================
+   // Final signals
+   //==================================================
+   if(upTrend && pricePullbackBuy && rsiBuy)
+      return 1;
 
-   // ================= BUY CONDITIONS =================
-   if(trendUp)
-   {
-      bool rsiPullback =
-         (rsi_2 < RSI_BuyLevel) &&     // RSI dipped
-         (rsi_1 > rsi_2) &&            // RSI turning up
-         (rsi_1 > 45);                 // avoid weak bounces
-
-      bool priceRejection =
-         close1 > close2 &&            // higher close
-         bullishCandle;                // bullish momentum
-
-      if(rsiPullback && priceRejection)
-         return 1;
-   }
-
-   // ================= SELL CONDITIONS =================
-   if(trendDown)
-   {
-      bool rsiPullback =
-         (rsi_2 > RSI_SellLevel) &&    // RSI spiked
-         (rsi_1 < rsi_2) &&            // RSI turning down
-         (rsi_1 < 55);                 // avoid weak fades
-
-      bool priceRejection =
-         close1 < close2 &&            // lower close
-         bearishCandle;                // bearish momentum
-
-      if(rsiPullback && priceRejection)
-         return -1;
-   }
+   if(downTrend && pricePullbackSell && rsiSell)
+      return -1;
 
    return 0;
 }
